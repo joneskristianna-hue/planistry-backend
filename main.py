@@ -85,32 +85,35 @@ async def signup(payload: SignupRequest):
 
 from supabase import create_client, Client
 
-@app.post("/login")
-async def login(payload: LoginRequest):
-    # Attempt to sign in with Supabase
-    res = supabase.auth.sign_in_with_password({
-        "email": payload.email,
-        "password": payload.password
-    })
+from fastapi import HTTPException
 
-    if res.user is None:
-        # Determine a more specific message
-        if "invalid login credentials" in str(res):
+@app.post("/login")
+async def login(email: str, password: str):
+    try:
+        res = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+        user = res.user
+        if user is None:
+            # This is just in case Supabase returns None without raising
+            raise HTTPException(status_code=401, detail="Email or password is incorrect")
+        
+        return {
+            "message": "Login successful",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "confirmed_at": user.confirmed_at
+            }
+        }
+
+    except Exception as e:
+        # Catch the AuthApiError and map it to your friendly message
+        if "Invalid login credentials" in str(e):
             raise HTTPException(status_code=401, detail="Email or password is incorrect")
         else:
-            raise HTTPException(status_code=400, detail="Login failed")
-
-    user = res.user
-
-    # Return clean response
-    return {
-        "message": "Login successful",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "confirmed_at": user.confirmed_at
-        }
-    }
+            raise HTTPException(status_code=400, detail=f"Login failed: {str(e)}")
 
 @app.get("/")
 def root():
