@@ -88,3 +88,6 @@ async def login(payload: LoginRequest):
             "confirmed_at": user.confirmed_at  # optional
         }
     }
+@app.get("/")
+def root():
+    return {"message": "Welcome to Planistry Backend!"}
