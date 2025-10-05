@@ -20,7 +20,7 @@ app = FastAPI(title="Planistry Backend")
 # -------------------------------
 
 class SignupRequest(BaseModel):
-    email: EmailStr #temporarily no email validation for local testing, UPDATE BEFORE PROD
+    email: str #temporarily no email validation for local testing, UPDATE BEFORE PROD
     password: str
     name: str | None = None
 
