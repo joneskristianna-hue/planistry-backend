@@ -83,25 +83,39 @@ async def signup(payload: SignupRequest):
 # Login endpoint
 # -------------------------------
 
+from supabase import create_client, Client
+from supabase.lib.auth_client import AuthApiError
+
 @app.post("/login")
-async def login(payload: LoginRequest):
-    res = supabase.auth.sign_in_with_password({
-        "email": payload.email,
-        "password": payload.password
-    })
+async def login(email: str, password: str):
+    try:
+        res = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+        
+        if res.user is None:
+            # Determine a more specific message
+            if "invalid login credentials" in str(res):
+                raise HTTPException(status_code=401, detail="Email or password is incorrect")
+            else:
+                raise HTTPException(status_code=400, detail="Login failed")
+        
+        user = res.user
 
-    user = res.user
-    if not user:
-        raise HTTPException(status_code=400, detail="Login failed")
-
-    return {
-        "message": "Login successful",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "confirmed_at": user.confirmed_at  # optional
+        return {
+            "message": "Login successful",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "confirmed_at": user.confirmed_at
+            }
         }
-    }
+
+    except AuthApiError as e:
+        # Catch specific Supabase errors
+        raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
+
 @app.get("/")
 def root():
     return {"message": "Welcome to Planistry Backend!"}
