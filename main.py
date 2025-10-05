@@ -25,7 +25,7 @@ class SignupRequest(BaseModel):
     name: str | None = None
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str #temporarily no email validation for local testing, UPDATE BEFORE PROD
     password: str
 
 # -------------------------------
@@ -84,37 +84,33 @@ async def signup(payload: SignupRequest):
 # -------------------------------
 
 from supabase import create_client, Client
-from supabase.lib.auth_client import AuthApiError
 
 @app.post("/login")
-async def login(email: str, password: str):
-    try:
-        res = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": password
-        })
-        
-        if res.user is None:
-            # Determine a more specific message
-            if "invalid login credentials" in str(res):
-                raise HTTPException(status_code=401, detail="Email or password is incorrect")
-            else:
-                raise HTTPException(status_code=400, detail="Login failed")
-        
-        user = res.user
+async def login(payload: LoginRequest):
+    # Attempt to sign in with Supabase
+    res = supabase.auth.sign_in_with_password({
+        "email": payload.email,
+        "password": payload.password
+    })
 
-        return {
-            "message": "Login successful",
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "confirmed_at": user.confirmed_at
-            }
+    if res.user is None:
+        # Determine a more specific message
+        if "invalid login credentials" in str(res):
+            raise HTTPException(status_code=401, detail="Email or password is incorrect")
+        else:
+            raise HTTPException(status_code=400, detail="Login failed")
+
+    user = res.user
+
+    # Return clean response
+    return {
+        "message": "Login successful",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "confirmed_at": user.confirmed_at
         }
-
-    except AuthApiError as e:
-        # Catch specific Supabase errors
-        raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
+    }
 
 @app.get("/")
 def root():
