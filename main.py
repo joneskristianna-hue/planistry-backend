@@ -88,7 +88,9 @@ from supabase import create_client, Client
 from fastapi import HTTPException
 
 @app.post("/login")
-async def login(email: str, password: str):
+async def login(payload: LoginRequest):
+    email = payload.email
+    password = payload.password
     try:
         res = supabase.auth.sign_in_with_password({
             "email": email,
