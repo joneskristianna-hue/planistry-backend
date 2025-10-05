@@ -20,7 +20,7 @@ app = FastAPI(title="Planistry Backend")
 # -------------------------------
 
 class SignupRequest(BaseModel):
-    email: EmailStr
+    email: EmailStr #temporarily no email validation for local testing, UPDATE BEFORE PROD
     password: str
     name: str | None = None
 
@@ -40,28 +40,42 @@ async def signup(payload: SignupRequest):
         "password": payload.password
     })
 
-    user = res.user
-    if not user:
+    if res.user is None:
         raise HTTPException(status_code=400, detail="Signup failed")
 
-    # Insert a row in the couples table
-    supabase.table("couples").insert({
-        "id": user.id,
-        "name": payload.name,
-        "email": payload.email,
-        "wedding_date": None,
-        "budget": 0,
-        "guest_range": 0,
-        "location": ""
-    }).execute()
+    user = res.user
 
-    # Return a clean response
+    # Insert into couples table with enhanced error handling
+    from postgrest.exceptions import APIError
+
+    try:
+        supabase.table("couples").insert({
+            "id": user.id,
+            "name": payload.name,
+            "email": payload.email,
+            "wedding_date": None,
+            "budget": 0,
+            "guest_range": 0,
+            "location": ""
+        }).execute()
+    except APIError as e:
+        if 'duplicate key value violates unique constraint "couples_email_key"' in str(e):
+            raise HTTPException(
+                status_code=400,
+                detail="This email is already registered. Try logging in instead."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected database error: {str(e)}"
+            )
+
     return {
         "message": "Signup successful",
         "user": {
             "id": user.id,
             "email": user.email,
-            "confirmed_at": user.confirmed_at  # optional
+            "confirmed_at": user.confirmed_at
         }
     }
 
