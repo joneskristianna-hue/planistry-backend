@@ -1,1 +1,32 @@
+# macOS system files
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+*.env
+
+# IDEs and tools
+.vscode/
+.idea/
+
+# Logs / cache
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Model/data files (future)
+*.pt
+*.pth
+*.onnx
