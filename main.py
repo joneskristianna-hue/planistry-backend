@@ -160,12 +160,12 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
     )
 
     # Check if upload succeeded
-    if res.status_code != 200 or not res.data:
+    if not res.data:
         raise HTTPException(
             status_code=500, 
-            detail=f"Supabase storage upload failed. Response: {res.data}"
+            detail="Supabase storage upload failed"
         )
-
+        
     # 5) Construct public URL (if bucket is public)
     file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
 
