@@ -158,6 +158,7 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
         .eq("couple_id", couple_id).eq("file_name", file.filename).execute()
 
     duplicate_prevented = False
+    new_row_created = False
     if existing.data:
         duplicate_prevented = True
         logging.info(f"Duplicate upload prevented for couple {couple_id}, file '{file.filename}'")
@@ -187,6 +188,7 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
                 "file_name": file.filename,
                 "file_path": file_url
             }).execute()
+            new_row_created = True
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to insert into images table: {str(e)}")
     else:
@@ -197,6 +199,7 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
         "status": "success",
         "file_url": file_url,
         "duplicate_prevented": duplicate_prevented
+        "new_row_created": new_row_created
     }
 
     if duplicate_prevented:
