@@ -198,7 +198,7 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
     response = {
         "status": "success",
         "file_url": file_url,
-        "duplicate_prevented": duplicate_prevented
+        "duplicate_prevented": duplicate_prevented,
         "new_row_created": new_row_created
     }
 
