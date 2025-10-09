@@ -166,14 +166,17 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
     file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
 
     # 6) Insert metadata into images table
-    insert_res = supabase.table("images").insert({
-        "id": str(uuid.uuid4()),
-        "couple_id": couple_id,
-        "file_name": file.filename,
-        "file_path": file_url
-    }).execute()
+    from postgrest.exceptions import APIError
 
-    if insert_res.get("error"):
-        raise HTTPException(status_code=500, detail="Failed to insert into images table")
+    try:
+        supabase.table("images").insert({
+            "id": str(uuid.uuid4()),
+            "couple_id": couple_id,  # must be a valid UUID
+            "file_name": file.filename,
+            "file_path": file_url
+        }).execute()
+    except APIError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to insert into images table: {str(e)}")
+
 
     return {"status": "success", "file_url": file_url}
