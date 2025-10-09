@@ -153,7 +153,11 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
     path = f"{couple_id}/{uuid.uuid4()}_{file.filename}"
 
     # 4) Upload to Supabase Storage
-    res = supabase.storage.from_(BUCKET).upload(path, contents)
+    res = supabase.storage.from_(BUCKET).upload(
+    path,
+    contents,
+    {"content-type": file.content_type}  # tell Supabase it’s really an image
+)
     if res.get("error"):
         raise HTTPException(status_code=500, detail="Supabase storage upload failed")
 
