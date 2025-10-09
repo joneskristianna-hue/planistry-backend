@@ -117,6 +117,58 @@ async def login(payload: LoginRequest):
         else:
             raise HTTPException(status_code=400, detail=f"Login failed: {str(e)}")
 
+# -------------------------------
+# happy path home page
+# -------------------------------
 @app.get("/")
 def root():
     return {"message": "Welcome to Planistry Backend!"}
+
+# -------------------------------
+# Upload Couple Image endpoint
+# -------------------------------
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from supabase import create_client
+import uuid
+import os
+
+app = FastAPI()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+BUCKET = "couple-images"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+@app.post("/upload-couple-image")
+async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = File(...)):
+    # 1) Validate file type
+    if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+        raise HTTPException(status_code=400, detail="File type not allowed")
+
+    # 2) Read file bytes
+    contents = await file.read()
+
+    # 3) Create a unique path
+    path = f"{couple_id}/{uuid.uuid4()}_{file.filename}"
+
+    # 4) Upload to Supabase Storage
+    res = supabase.storage.from_(BUCKET).upload(path, contents)
+    if res.get("error"):
+        raise HTTPException(status_code=500, detail="Supabase storage upload failed")
+
+    # 5) Construct public URL (if bucket is public)
+    file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+
+    # 6) Insert metadata into images table
+    insert_res = supabase.table("images").insert({
+        "id": str(uuid.uuid4()),
+        "couple_id": couple_id,
+        "file_name": file.filename,
+        "file_path": file_url
+    }).execute()
+
+    if insert_res.get("error"):
+        raise HTTPException(status_code=500, detail="Failed to insert into images table")
+
+    return {"status": "success", "file_url": file_url}
