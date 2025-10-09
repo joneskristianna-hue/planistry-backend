@@ -154,12 +154,14 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
 
     # 4) Upload to Supabase Storage
     res = supabase.storage.from_(BUCKET).upload(
-    path,
-    contents,
-    {"content-type": file.content_type}  # tell Supabase it’s really an image
-)
-    if res.get("error"):
-        raise HTTPException(status_code=500, detail="Supabase storage upload failed")
+        path,
+        contents,
+        {"content-type": file.content_type}
+    )
+
+    # Check if upload succeeded
+    if not res or res.error:
+        raise HTTPException(status_code=500, detail=f"Supabase storage upload failed: {res.error}")
 
     # 5) Construct public URL (if bucket is public)
     file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
