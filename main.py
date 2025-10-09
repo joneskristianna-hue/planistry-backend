@@ -153,8 +153,6 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
     path = f"{couple_id}/{uuid.uuid4()}_{file.filename}"
 
     # 4) Upload to Supabase Storage
-    from storage3 import StorageApiError
-
     try:
         res = supabase.storage.from_(BUCKET).upload(
             path,
