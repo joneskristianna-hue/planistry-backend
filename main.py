@@ -131,6 +131,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from supabase import create_client
 import uuid
 import os
+import logging
 
 app = FastAPI()
 
@@ -139,6 +140,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BUCKET = "couple-images"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
 
 @app.post("/upload-couple-image")
 async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = File(...)):
@@ -149,34 +153,54 @@ async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = Fil
     # 2) Read file bytes
     contents = await file.read()
 
-    # 3) Create a unique path
-    path = f"{couple_id}/{uuid.uuid4()}_{file.filename}"
+    # 3) Check if this couple has already uploaded a file with the same name
+    existing = supabase.table("images").select("*")\
+        .eq("couple_id", couple_id).eq("file_name", file.filename).execute()
 
-    # 4) Upload to Supabase Storage
-    try:
-        res = supabase.storage.from_(BUCKET).upload(
-            path,
-            contents,
-            {"content-type": file.content_type}
-        )
-    except StorageApiError as e:
-        raise HTTPException(status_code=500, detail=f"Supabase storage upload failed: {str(e)}")
+    duplicate_prevented = False
+    if existing.data:
+        duplicate_prevented = True
+        logging.info(f"Duplicate upload prevented for couple {couple_id}, file '{file.filename}'")
 
-    # 5) Construct public URL (if bucket is public)
-    file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+    # 4) Only proceed with upload if it’s not a duplicate
+    if not duplicate_prevented:
+        path = f"{couple_id}/{uuid.uuid4()}_{file.filename}"
 
-    # 6) Insert metadata into images table
-    from postgrest.exceptions import APIError
+        # 5) Upload to Supabase Storage
+        try:
+            res = supabase.storage.from_(BUCKET).upload(
+                path,
+                contents,
+                {"content-type": file.content_type}
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Supabase storage upload failed: {str(e)}")
 
-    try:
-        supabase.table("images").insert({
-            "id": str(uuid.uuid4()),
-            "couple_id": couple_id,  # must be a valid UUID
-            "file_name": file.filename,
-            "file_path": file_url
-        }).execute()
-    except APIError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to insert into images table: {str(e)}")
+        # 6) Construct public URL (if bucket is public)
+        file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
 
+        # 7) Insert metadata into images table
+        try:
+            supabase.table("images").insert({
+                "id": str(uuid.uuid4()),
+                "couple_id": couple_id,  # must be a valid UUID
+                "file_name": file.filename,
+                "file_path": file_url
+            }).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to insert into images table: {str(e)}")
+    else:
+        file_url = existing.data[0]["file_path"]  # return the URL of the existing file
 
-    return {"status": "success", "file_url": file_url}
+    # 8) Return success response, including info if a duplicate was skipped
+    response = {
+        "status": "success",
+        "file_url": file_url,
+        "duplicate_prevented": duplicate_prevented
+    }
+
+    if duplicate_prevented:
+        logging.info(f"Upload request for couple {couple_id} skipped duplicate file '{file.filename}'")
+
+    return response
+
