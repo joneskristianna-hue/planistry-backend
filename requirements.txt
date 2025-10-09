@@ -4,3 +4,4 @@ supabase
 python-dotenv
 pydantic
 email-validator
+python-multipart
