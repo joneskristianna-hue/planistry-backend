@@ -128,35 +128,40 @@ def root():
 # Upload Couple Image endpoint
 # -------------------------------
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from typing import List
 from supabase import create_client
 import uuid
 import os
 import logging
+import base64
+from openai import OpenAI
 
 app = FastAPI()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # service key for uploads
 BUCKET = "couple-images"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Configure basic logging
 logging.basicConfig(level=logging.INFO)
+
+def get_image_embedding(file_bytes: bytes):
+    """Generate a vector embedding for an image using OpenAI CLIP."""
+    img_b64 = base64.b64encode(file_bytes).decode("utf-8")
+    response = client.embeddings.create(
+        model="image-embedding-clip",
+        input=img_b64
+    )
+    return response.data[0].embedding
 
 
 @app.post("/upload-couple-images")
 async def upload_couple_images(
     couple_id: str = Form(...),
     category: str = Form(...),
-    files: List[UploadFile] = File(...)
+    files: list[UploadFile] = File(...)
 ):
-    """
-    Allows batch upload of multiple images for a single couple and category.
-    Prevents duplicate uploads based on (couple_id + file_name + category).
-    """
-
     results = []
 
     for file in files:
@@ -173,11 +178,11 @@ async def upload_couple_images(
         # 2) Read file bytes
         contents = await file.read()
 
-        # 3) Check if this couple already uploaded the same file for this category
-        existing = supabase.table("images").select("*") \
-            .eq("couple_id", couple_id) \
-            .eq("file_name", file.filename) \
-            .eq("category", category) \
+        # 3) Check for duplicates
+        existing = supabase.table("images").select("*")\
+            .eq("couple_id", couple_id)\
+            .eq("file_name", file.filename)\
+            .eq("category", category)\
             .execute()
 
         duplicate_prevented = False
@@ -185,12 +190,11 @@ async def upload_couple_images(
 
         if existing.data:
             duplicate_prevented = True
-            logging.info(f"Duplicate prevented for couple {couple_id}, file '{file.filename}', category '{category}'")
-
-        # 4) Only upload if it’s not a duplicate
-        if not duplicate_prevented:
+            file_url = existing.data[0]["file_path"]
+            logging.info(f"Duplicate prevented: {file.filename} for couple {couple_id}, category {category}")
+        else:
+            # 4) Upload to Supabase Storage
             path = f"{couple_id}/{category}/{uuid.uuid4()}_{file.filename}"
-
             try:
                 res = supabase.storage.from_(BUCKET).upload(
                     path,
@@ -206,31 +210,41 @@ async def upload_couple_images(
                 })
                 continue
 
-            # 5) Construct public URL (assuming bucket is public)
             file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
 
-            # 6) Insert metadata into the database
+            # 5) Generate embedding
+            try:
+                embedding = get_image_embedding(contents)
+            except Exception as e:
+                logging.error(f"Embedding generation failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Embedding generation failed: {str(e)}"
+                })
+                continue
+
+            # 6) Insert metadata + embedding into images table
             try:
                 supabase.table("images").insert({
                     "id": str(uuid.uuid4()),
                     "couple_id": couple_id,
-                    "category": category,
                     "file_name": file.filename,
-                    "file_path": file_url
+                    "file_path": file_url,
+                    "category": category,
+                    "embedding": embedding  # store as JSON or array depending on your column type
                 }).execute()
                 new_row_created = True
             except Exception as e:
-                logging.error(f"Failed to insert metadata for {file.filename}: {str(e)}")
+                logging.error(f"Inserting metadata failed for {file.filename}: {str(e)}")
                 results.append({
                     "file_name": file.filename,
                     "status": "error",
-                    "detail": f"Failed to insert into images table: {str(e)}"
+                    "detail": f"Inserting metadata failed: {str(e)}"
                 })
                 continue
-        else:
-            file_url = existing.data[0]["file_path"]
 
-        # 7) Add successful upload info to results
+        # 7) Append result for this file
         results.append({
             "file_name": file.filename,
             "file_url": file_url,
@@ -239,12 +253,7 @@ async def upload_couple_images(
             "status": "success"
         })
 
-    # 8) Return full batch summary
-    return {
-        "status": "completed",
-        "couple_id": couple_id,
-        "category": category,
-        "results": results
-    }
+    return {"results": results}
+
 
 
