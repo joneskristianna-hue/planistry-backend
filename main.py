@@ -128,6 +128,7 @@ def root():
 # Upload Couple Image endpoint
 # -------------------------------
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from typing import List
 from supabase import create_client
 import uuid
 import os
@@ -144,66 +145,106 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 
-@app.post("/upload-couple-image")
-async def upload_couple_image(couple_id: str = Form(...), file: UploadFile = File(...)):
-    # 1) Validate file type
-    if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
-        raise HTTPException(status_code=400, detail="File type not allowed")
 
-    # 2) Read file bytes
-    contents = await file.read()
+@app.post("/upload-couple-images")
+async def upload_couple_images(
+    couple_id: str = Form(...),
+    category: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """
+    Allows batch upload of multiple images for a single couple and category.
+    Prevents duplicate uploads based on (couple_id + file_name + category).
+    """
 
-    # 3) Check if this couple has already uploaded a file with the same name
-    existing = supabase.table("images").select("*")\
-        .eq("couple_id", couple_id).eq("file_name", file.filename).execute()
+    results = []
 
-    duplicate_prevented = False
-    new_row_created = False
-    if existing.data:
-        duplicate_prevented = True
-        logging.info(f"Duplicate upload prevented for couple {couple_id}, file '{file.filename}'")
-
-    # 4) Only proceed with upload if it’s not a duplicate
-    if not duplicate_prevented:
-        path = f"{couple_id}/{uuid.uuid4()}_{file.filename}"
-
-        # 5) Upload to Supabase Storage
-        try:
-            res = supabase.storage.from_(BUCKET).upload(
-                path,
-                contents,
-                {"content-type": file.content_type}
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase storage upload failed: {str(e)}")
-
-        # 6) Construct public URL (if bucket is public)
-        file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
-
-        # 7) Insert metadata into images table
-        try:
-            supabase.table("images").insert({
-                "id": str(uuid.uuid4()),
-                "couple_id": couple_id,  # must be a valid UUID
+    for file in files:
+        # 1) Validate file type
+        if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            logging.warning(f"Rejected file with invalid type: {file.filename}")
+            results.append({
                 "file_name": file.filename,
-                "file_path": file_url
-            }).execute()
-            new_row_created = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to insert into images table: {str(e)}")
-    else:
-        file_url = existing.data[0]["file_path"]  # return the URL of the existing file
+                "status": "error",
+                "detail": "File type not allowed"
+            })
+            continue
 
-    # 8) Return success response, including info if a duplicate was skipped
-    response = {
-        "status": "success",
-        "file_url": file_url,
-        "duplicate_prevented": duplicate_prevented,
-        "new_row_created": new_row_created
+        # 2) Read file bytes
+        contents = await file.read()
+
+        # 3) Check if this couple already uploaded the same file for this category
+        existing = supabase.table("images").select("*") \
+            .eq("couple_id", couple_id) \
+            .eq("file_name", file.filename) \
+            .eq("category", category) \
+            .execute()
+
+        duplicate_prevented = False
+        new_row_created = False
+
+        if existing.data:
+            duplicate_prevented = True
+            logging.info(f"Duplicate prevented for couple {couple_id}, file '{file.filename}', category '{category}'")
+
+        # 4) Only upload if it’s not a duplicate
+        if not duplicate_prevented:
+            path = f"{couple_id}/{category}/{uuid.uuid4()}_{file.filename}"
+
+            try:
+                res = supabase.storage.from_(BUCKET).upload(
+                    path,
+                    contents,
+                    {"content-type": file.content_type}
+                )
+            except Exception as e:
+                logging.error(f"Upload failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Supabase storage upload failed: {str(e)}"
+                })
+                continue
+
+            # 5) Construct public URL (assuming bucket is public)
+            file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+
+            # 6) Insert metadata into the database
+            try:
+                supabase.table("images").insert({
+                    "id": str(uuid.uuid4()),
+                    "couple_id": couple_id,
+                    "category": category,
+                    "file_name": file.filename,
+                    "file_path": file_url
+                }).execute()
+                new_row_created = True
+            except Exception as e:
+                logging.error(f"Failed to insert metadata for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Failed to insert into images table: {str(e)}"
+                })
+                continue
+        else:
+            file_url = existing.data[0]["file_path"]
+
+        # 7) Add successful upload info to results
+        results.append({
+            "file_name": file.filename,
+            "file_url": file_url,
+            "duplicate_prevented": duplicate_prevented,
+            "new_row_created": new_row_created,
+            "status": "success"
+        })
+
+    # 8) Return full batch summary
+    return {
+        "status": "completed",
+        "couple_id": couple_id,
+        "category": category,
+        "results": results
     }
 
-    if duplicate_prevented:
-        logging.info(f"Upload request for couple {couple_id} skipped duplicate file '{file.filename}'")
-
-    return response
 
