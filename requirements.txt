@@ -5,3 +5,6 @@ python-dotenv
 pydantic
 email-validator
 python-multipart
+sentence-transformers
+pillow
+numpy

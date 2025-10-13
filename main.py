@@ -125,36 +125,49 @@ def root():
     return {"message": "Welcome to Planistry Backend!"}
 
 # -------------------------------
-# Upload Couple Image endpoint
+# Upload Couple Image endpoint + Image Embedding Generation
 # -------------------------------
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from supabase import create_client
 import uuid
 import os
 import logging
-import base64
-from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from PIL import Image
+import io
+import numpy as np
+from pinecone import Pinecone
 
 app = FastAPI()
 
+# Load CLIP model once when server starts
+model = SentenceTransformer('clip-ViT-B-32')
+
+# Initialize Pinecone
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("planistry-image-embeddings")
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # service key for uploads
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service key for uploads
 BUCKET = "couple-images"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 logging.basicConfig(level=logging.INFO)
 
 def get_image_embedding(file_bytes: bytes):
-    """Generate a vector embedding for an image using OpenAI CLIP."""
-    img_b64 = base64.b64encode(file_bytes).decode("utf-8")
-    response = client.embeddings.create(
-        model="image-embedding-clip",
-        input=img_b64
-    )
-    return response.data[0].embedding
-
+    """Generate 512-dimensional CLIP embedding"""
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        embedding = model.encode(image, convert_to_numpy=True)
+        # Normalize for cosine similarity
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.tolist()
+    except Exception as e:
+        raise Exception(f"Embedding generation failed: {str(e)}")
 
 @app.post("/upload-couple-images")
 async def upload_couple_images(
@@ -215,6 +228,7 @@ async def upload_couple_images(
             # 5) Generate embedding
             try:
                 embedding = get_image_embedding(contents)
+                logging.info(f"Generated embedding for {file.filename}: {len(embedding)} dimensions")
             except Exception as e:
                 logging.error(f"Embedding generation failed for {file.filename}: {str(e)}")
                 results.append({
@@ -224,17 +238,44 @@ async def upload_couple_images(
                 })
                 continue
 
-            # 6) Insert metadata + embedding into images table
+            # 6) Generate unique ID for this image
+            image_id = str(uuid.uuid4())
+
+            # 7) Insert into Pinecone
+            try:
+                index.upsert(vectors=[(
+                    image_id,  # unique ID
+                    embedding,  # 512-dim vector
+                    {
+                        "couple_id": couple_id,
+                        "category": category,
+                        "file_path": file_url,
+                        "file_name": file.filename,
+                        "type": "couple_image"  # vs "vendor_image"
+                    }
+                )])
+                logging.info(f"Inserted {file.filename} into Pinecone with ID {image_id}")
+            except Exception as e:
+                logging.error(f"Pinecone insert failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Pinecone insert failed: {str(e)}"
+                })
+                continue
+
+            # 8) Insert metadata into Supabase images table
             try:
                 supabase.table("images").insert({
-                    "id": str(uuid.uuid4()),
+                    "id": image_id,  # Use same ID as Pinecone
                     "couple_id": couple_id,
                     "file_name": file.filename,
                     "file_path": file_url,
                     "category": category,
-                    "embedding": embedding  # store as JSON or array depending on your column type
+                    "embedding_id": image_id  # Reference to Pinecone vector ID
                 }).execute()
                 new_row_created = True
+                logging.info(f"Inserted {file.filename} metadata into Supabase")
             except Exception as e:
                 logging.error(f"Inserting metadata failed for {file.filename}: {str(e)}")
                 results.append({
@@ -244,7 +285,7 @@ async def upload_couple_images(
                 })
                 continue
 
-        # 7) Append result for this file
+        # 9) Append result for this file
         results.append({
             "file_name": file.filename,
             "file_url": file_url,
@@ -253,7 +294,35 @@ async def upload_couple_images(
             "status": "success"
         })
 
-    return {"results": results}
+    return {
+        "results": results,
+        "total_uploaded": len([r for r in results if r["status"] == "success"]),
+        "total_failed": len([r for r in results if r["status"] == "error"])
+    }
 
+@app.get("/health")
+async def health_check():
+    # Test Pinecone connection
+    try:
+        index.describe_index_stats()
+        pinecone_healthy = True
+    except:
+        pinecone_healthy = False
+    
+    # Test Supabase connection
+    try:
+        supabase.table("images").select("id").limit(1).execute()
+        supabase_healthy = True
+    except:
+        supabase_healthy = False
+    
+    return {
+        "status": "healthy" if (pinecone_healthy and supabase_healthy) else "degraded",
+        "model": "clip-ViT-B-32",
+        "embedding_dimension": 512,
+        "pinecone_index": "planistry-image-embeddings",
+        "pinecone_connected": pinecone_healthy,
+        "supabase_connected": supabase_healthy
+    }
 
 
