@@ -299,6 +299,179 @@ async def upload_couple_images(
         "total_uploaded": len([r for r in results if r["status"] == "success"]),
         "total_failed": len([r for r in results if r["status"] == "error"])
     }
+    
+# -------------------------------
+# Upload Vendor Images endpoint + Image Embedding Generation
+# -------------------------------    
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from supabase import create_client
+import uuid
+import os
+import logging
+from sentence_transformers import SentenceTransformer
+from PIL import Image
+import io
+import numpy as np
+from pinecone import Pinecone
+
+app = FastAPI()
+
+# Load CLIP model once when server starts
+model = SentenceTransformer('clip-ViT-B-32')
+
+# Initialize Pinecone
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("planistry-image-embeddings")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service key for uploads
+BUCKET = "vendor-images"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+logging.basicConfig(level=logging.INFO)
+
+def get_image_embedding(file_bytes: bytes):
+    """Generate 512-dimensional CLIP embedding"""
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        embedding = model.encode(image, convert_to_numpy=True)
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.tolist()
+    except Exception as e:
+        raise Exception(f"Embedding generation failed: {str(e)}")
+
+@app.post("/upload-vendor-images")
+async def upload_vendor_images(
+    vendor_id: str = Form(...),
+    category: str = Form(...),
+    files: list[UploadFile] = File(...)
+):
+    results = []
+
+    for file in files:
+        # Validate file type
+        if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            logging.warning(f"Rejected file with invalid type: {file.filename}")
+            results.append({
+                "file_name": file.filename,
+                "status": "error",
+                "detail": "File type not allowed"
+            })
+            continue
+
+        contents = await file.read()
+
+        # Check for duplicates
+        existing = supabase.table("vendor_images").select("*")\
+            .eq("vendor_id", vendor_id)\
+            .eq("file_name", file.filename)\
+            .eq("category", category)\
+            .execute()
+
+        duplicate_prevented = False
+        new_row_created = False
+
+        if existing.data:
+            duplicate_prevented = True
+            file_url = existing.data[0]["file_path"]
+            logging.info(f"Duplicate prevented: {file.filename} for vendor {vendor_id}, category {category}")
+        else:
+            # Upload to Supabase Storage
+            path = f"{vendor_id}/{category}/{uuid.uuid4()}_{file.filename}"
+            try:
+                supabase.storage.from_(BUCKET).upload(
+                    path,
+                    contents,
+                    {"content-type": file.content_type}
+                )
+            except Exception as e:
+                logging.error(f"Upload failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Supabase upload failed: {str(e)}"
+                })
+                continue
+
+            file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+
+            # Generate embedding
+            try:
+                embedding = get_image_embedding(contents)
+                logging.info(f"Generated embedding for {file.filename}: {len(embedding)} dimensions")
+            except Exception as e:
+                logging.error(f"Embedding generation failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Embedding generation failed: {str(e)}"
+                })
+                continue
+
+            image_id = str(uuid.uuid4())
+
+            # Insert into Pinecone
+            try:
+                index.upsert(vectors=[(
+                    image_id,
+                    embedding,
+                    {
+                        "vendor_id": vendor_id,
+                        "category": category,
+                        "file_path": file_url,
+                        "file_name": file.filename,
+                        "type": "vendor_image"
+                    }
+                )])
+                logging.info(f"Inserted {file.filename} into Pinecone with ID {image_id}")
+            except Exception as e:
+                logging.error(f"Pinecone insert failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Pinecone insert failed: {str(e)}"
+                })
+                continue
+
+            # Insert metadata into Supabase vendor_images table
+            try:
+                supabase.table("vendor_images").insert({
+                    "id": image_id,
+                    "vendor_id": vendor_id,
+                    "file_name": file.filename,
+                    "file_path": file_url,
+                    "category": category,
+                    "embedding_id": image_id
+                }).execute()
+                new_row_created = True
+                logging.info(f"Inserted {file.filename} metadata into vendor_images")
+            except Exception as e:
+                logging.error(f"Inserting metadata failed for {file.filename}: {str(e)}")
+                results.append({
+                    "file_name": file.filename,
+                    "status": "error",
+                    "detail": f"Inserting metadata failed: {str(e)}"
+                })
+                continue
+
+        results.append({
+            "file_name": file.filename,
+            "file_url": file_url,
+            "duplicate_prevented": duplicate_prevented,
+            "new_row_created": new_row_created,
+            "status": "success"
+        })
+
+    return {
+        "results": results,
+        "total_uploaded": len([r for r in results if r["status"] == "success"]),
+        "total_failed": len([r for r in results if r["status"] == "error"])
+    }
+
 
 @app.get("/health")
 async def health_check():
