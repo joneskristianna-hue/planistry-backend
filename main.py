@@ -383,7 +383,7 @@ async def upload_vendor_images(
             # Upload to Supabase Storage
             path = f"{vendor_id}/{category}/{uuid.uuid4()}_{file.filename}"
             try:
-                supabase.storage.from_(BUCKET).upload(
+                res = supabase.storage.from_(BUCKET).upload(
                     path,
                     contents,
                     {"content-type": file.content_type}
@@ -393,7 +393,7 @@ async def upload_vendor_images(
                 results.append({
                     "file_name": file.filename,
                     "status": "error",
-                    "detail": f"Supabase upload failed: {str(e)}"
+                    "detail": f"Supabase storage upload failed: {str(e)}"
                 })
                 continue
 
