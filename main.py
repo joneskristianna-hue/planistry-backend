@@ -1,39 +1,95 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, EmailStr
+# ===================================
+# IMPORTS (All at the top)
+# ===================================
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
 from supabase import create_client, Client
+from postgrest.exceptions import APIError
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+from PIL import Image
+from pinecone import Pinecone
 import os
+import uuid
+import logging
+import io
+import numpy as np
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
+# ===================================
+# CONFIGURATION
+# ===================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
-# Create a Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
+# ===================================
+# INITIALIZE APP & SERVICES (Once!)
+# ===================================
 app = FastAPI(title="Planistry Backend")
 
-# -------------------------------
-# Pydantic models
-# -------------------------------
+# Supabase client
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Set up model caching (works locally and on Render)
+if os.path.exists("/opt/render"):
+    # Running on Render
+    CACHE_DIR = "/opt/render/project/.cache"
+else:
+    # Running locally
+    CACHE_DIR = os.path.join(os.getcwd(), ".cache")
+
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.environ['TRANSFORMERS_CACHE'] = CACHE_DIR
+os.environ['SENTENCE_TRANSFORMERS_HOME'] = CACHE_DIR
+
+# Load CLIP model once when server starts (with caching)
+model = SentenceTransformer('clip-ViT-B-32', cache_folder=CACHE_DIR)
+
+# Initialize Pinecone
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index("planistry-image-embeddings")
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO)
+
+# ===================================
+# PYDANTIC MODELS
+# ===================================
 class SignupRequest(BaseModel):
-    email: str #temporarily no email validation for local testing, UPDATE BEFORE PROD
+    email: str
     password: str
     name: str | None = None
 
 class LoginRequest(BaseModel):
-    email: str #temporarily no email validation for local testing, UPDATE BEFORE PROD
+    email: str
     password: str
 
-# -------------------------------
-# Signup endpoint
-# -------------------------------
+# ===================================
+# HELPER FUNCTIONS
+# ===================================
+def get_image_embedding(file_bytes: bytes):
+    """Generate 512-dimensional CLIP embedding"""
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        embedding = model.encode(image, convert_to_numpy=True)
+        # Normalize for cosine similarity
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.tolist()
+    except Exception as e:
+        raise Exception(f"Embedding generation failed: {str(e)}")
 
+# ===================================
+# AUTH ENDPOINTS
+# ===================================
 @app.post("/signup")
 async def signup(payload: SignupRequest):
+    """Create new couple account"""
     # Create user in Supabase Auth
     res = supabase.auth.sign_up({
         "email": payload.email,
@@ -45,9 +101,7 @@ async def signup(payload: SignupRequest):
 
     user = res.user
 
-    # Insert into couples table with enhanced error handling
-    from postgrest.exceptions import APIError
-
+    # Insert into couples table
     try:
         supabase.table("couples").insert({
             "id": user.id,
@@ -79,26 +133,17 @@ async def signup(payload: SignupRequest):
         }
     }
 
-# -------------------------------
-# Login endpoint
-# -------------------------------
-
-from supabase import create_client, Client
-
-from fastapi import HTTPException
-
 @app.post("/login")
 async def login(payload: LoginRequest):
-    email = payload.email
-    password = payload.password
+    """Login existing couple"""
     try:
         res = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": password
+            "email": payload.email,
+            "password": payload.password
         })
         user = res.user
+        
         if user is None:
-            # This is just in case Supabase returns None without raising
             raise HTTPException(status_code=401, detail="Email or password is incorrect")
         
         return {
@@ -109,75 +154,28 @@ async def login(payload: LoginRequest):
                 "confirmed_at": user.confirmed_at
             }
         }
-
     except Exception as e:
-        # Catch the AuthApiError and map it to your friendly message
         if "Invalid login credentials" in str(e):
             raise HTTPException(status_code=401, detail="Email or password is incorrect")
         else:
             raise HTTPException(status_code=400, detail=f"Login failed: {str(e)}")
 
-# -------------------------------
-# happy path home page
-# -------------------------------
-@app.get("/")
-def root():
-    return {"message": "Welcome to Planistry Backend!"}
-
-# -------------------------------
-# Upload Couple Image endpoint + Image Embedding Generation
-# -------------------------------
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from supabase import create_client
-import uuid
-import os
-import logging
-from sentence_transformers import SentenceTransformer
-from PIL import Image
-import io
-import numpy as np
-from pinecone import Pinecone
-
-# Load CLIP model once when server starts
-model = SentenceTransformer('clip-ViT-B-32')
-
-# Initialize Pinecone
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("planistry-image-embeddings")
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service key for uploads
-BUCKET = "couple-images"
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-logging.basicConfig(level=logging.INFO)
-
-def get_image_embedding(file_bytes: bytes):
-    """Generate 512-dimensional CLIP embedding"""
-    try:
-        image = Image.open(io.BytesIO(file_bytes))
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        embedding = model.encode(image, convert_to_numpy=True)
-        # Normalize for cosine similarity
-        embedding = embedding / np.linalg.norm(embedding)
-        return embedding.tolist()
-    except Exception as e:
-        raise Exception(f"Embedding generation failed: {str(e)}")
-
+# ===================================
+# IMAGE UPLOAD ENDPOINTS
+# ===================================
 @app.post("/upload-couple-images")
 async def upload_couple_images(
     couple_id: str = Form(...),
     category: str = Form(...),
     files: list[UploadFile] = File(...)
 ):
+    """Upload couple inspiration images and generate embeddings"""
+    BUCKET = "couple-images"
     results = []
 
     for file in files:
         # 1) Validate file type
-        if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+        if not file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
             logging.warning(f"Rejected file with invalid type: {file.filename}")
             results.append({
                 "file_name": file.filename,
@@ -202,7 +200,7 @@ async def upload_couple_images(
         if existing.data:
             duplicate_prevented = True
             file_url = existing.data[0]["file_path"]
-            logging.info(f"Duplicate prevented: {file.filename} for couple {couple_id}, category {category}")
+            logging.info(f"Duplicate prevented: {file.filename} for couple {couple_id}")
         else:
             # 4) Upload to Supabase Storage
             path = f"{couple_id}/{category}/{uuid.uuid4()}_{file.filename}"
@@ -236,20 +234,20 @@ async def upload_couple_images(
                 })
                 continue
 
-            # 6) Generate unique ID for this image
+            # 6) Generate unique ID
             image_id = str(uuid.uuid4())
 
             # 7) Insert into Pinecone
             try:
                 index.upsert(vectors=[(
-                    image_id,  # unique ID
-                    embedding,  # 512-dim vector
+                    image_id,
+                    embedding,
                     {
                         "couple_id": couple_id,
                         "category": category,
                         "file_path": file_url,
                         "file_name": file.filename,
-                        "type": "couple_image"  # vs "vendor_image"
+                        "type": "couple_image"
                     }
                 )])
                 logging.info(f"Inserted {file.filename} into Pinecone with ID {image_id}")
@@ -262,15 +260,15 @@ async def upload_couple_images(
                 })
                 continue
 
-            # 8) Insert metadata into Supabase images table
+            # 8) Insert metadata into Supabase
             try:
                 supabase.table("images").insert({
-                    "id": image_id,  # Use same ID as Pinecone
+                    "id": image_id,
                     "couple_id": couple_id,
                     "file_name": file.filename,
                     "file_path": file_url,
                     "category": category,
-                    "embedding_id": image_id  # Reference to Pinecone vector ID
+                    "embedding_id": image_id
                 }).execute()
                 new_row_created = True
                 logging.info(f"Inserted {file.filename} metadata into Supabase")
@@ -283,7 +281,7 @@ async def upload_couple_images(
                 })
                 continue
 
-        # 9) Append result for this file
+        # 9) Append result
         results.append({
             "file_name": file.filename,
             "file_url": file_url,
@@ -297,62 +295,18 @@ async def upload_couple_images(
         "total_uploaded": len([r for r in results if r["status"] == "success"]),
         "total_failed": len([r for r in results if r["status"] == "error"])
     }
-    
-# -------------------------------
-# Upload Vendor Images endpoint + Image Embedding Generation
-# -------------------------------    
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from supabase import create_client
-import uuid
-import os
-import logging
-from sentence_transformers import SentenceTransformer
-from PIL import Image
-import io
-import numpy as np
-from pinecone import Pinecone
-
-# Load CLIP model once when server starts
-model = SentenceTransformer('clip-ViT-B-32')
-
-# Initialize Pinecone
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("planistry-image-embeddings")
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service key for uploads
-BUCKET = "vendor-images"
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-logging.basicConfig(level=logging.INFO)
-
-def get_image_embedding(file_bytes: bytes):
-    """Generate 512-dimensional CLIP embedding"""
-    try:
-        image = Image.open(io.BytesIO(file_bytes))
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        embedding = model.encode(image, convert_to_numpy=True)
-        embedding = embedding / np.linalg.norm(embedding)
-        return embedding.tolist()
-    except Exception as e:
-        raise Exception(f"Embedding generation failed: {str(e)}")
 
 @app.post("/upload-vendor-images")
 async def upload_vendor_images(
     vendor_id: str = Form(...),
-    vendor_type: str = Form("florist"),  # NEW: florist, photographer, venue, etc.
+    vendor_type: str = Form("florist"),
     category: str = Form("florals"),
-    city: str = Form("Austin"),  # NEW: for multi-city support
-    state: str = Form("TX"),  # NEW: for state-level filtering
+    city: str = Form("Austin"),
+    state: str = Form("TX"),
     files: list[UploadFile] = File(...)
 ):
-    """
-    Upload vendor portfolio images and generate embeddings.
-    Generic endpoint that works for any vendor type.
-    """
+    """Upload vendor portfolio images and generate embeddings"""
+    BUCKET = "vendor-images"
     results = []
 
     for file in files:
@@ -370,7 +324,6 @@ async def upload_vendor_images(
         contents = await file.read()
 
         # 3) Upload to Supabase Storage
-        # Organize by vendor type: vendors/{vendor_type}/{vendor_id}/{category}/
         path = f"vendors/{vendor_type}/{vendor_id}/{category}/{uuid.uuid4()}_{file.filename}"
         try:
             res = supabase.storage.from_(BUCKET).upload(
@@ -405,29 +358,20 @@ async def upload_vendor_images(
         # 5) Generate unique ID
         image_id = str(uuid.uuid4())
 
-        # 6) Insert into Pinecone with COMPLETE metadata
+        # 6) Insert into Pinecone
         try:
             index.upsert(vectors=[(
                 image_id,
                 embedding,
                 {
-                    # Vendor identification
                     "vendor_id": vendor_id,
-                    "vendor_type": vendor_type,  # ← CRITICAL for filtering!
-                    
-                    # Categorization
+                    "vendor_type": vendor_type,
                     "category": category,
-                    
-                    # Location (for multi-city expansion)
                     "city": city,
                     "state": state,
-                    
-                    # File info
                     "file_path": file_url,
                     "file_name": file.filename,
-                    
-                    # Type marker
-                    "type": "vendor_image"  # vs "couple_image"
+                    "type": "vendor_image"
                 }
             )])
             logging.info(f"Inserted {vendor_type} image into Pinecone: {file.filename} (city: {city})")
@@ -477,24 +421,20 @@ async def upload_vendor_images(
         "total_failed": len([r for r in results if r["status"] == "error"])
     }
 
-# -------------------------------
-# Vendor matching endpoint
-# ------------------------------- 
+# ===================================
+# MATCHING ENDPOINT
+# ===================================
 @app.post("/find-matching-vendors")
 async def find_matching_vendors(
     couple_id: str = Form(...),
-    vendor_type: str = Form("florist"),  # florist, photographer, venue, caterer, planner, dj
-    category: str = Form(None),  # Optional: bouquet, centerpiece, etc.
-    city: str = Form("Austin"),  # For future expansion
+    vendor_type: str = Form("florist"),
+    category: str = Form(None),
+    city: str = Form("Austin"),
     state: str = Form("TX"),
     top_k: int = Form(10),
-    min_match_score: float = Form(0.7)  # Filter out low matches
+    min_match_score: float = Form(0.7)
 ):
-    """
-    Find vendors whose work matches the couple's aesthetic.
-    Generic endpoint that works for any vendor type.
-    Returns rich vendor profiles with match percentages (The Knot style).
-    """
+    """Find vendors whose work matches the couple's aesthetic"""
     try:
         # 1. Get couple's image embeddings from Supabase
         query = supabase.table("images").select("id, embedding_id, category").eq("couple_id", couple_id)
@@ -524,14 +464,14 @@ async def find_matching_vendors(
         if not couple_embeddings:
             raise HTTPException(status_code=404, detail="Could not fetch embeddings from Pinecone")
         
-        # 3. Calculate average embedding (their "ideal aesthetic")
+        # 3. Calculate average embedding
         avg_embedding = np.mean(couple_embeddings, axis=0).tolist()
         logging.info(f"Calculated average aesthetic embedding for couple {couple_id}")
         
         # 4. Query Pinecone for similar vendor images
         search_filter = {
             "type": "vendor_image",
-            "vendor_type": vendor_type,  # Dynamic vendor type filtering
+            "vendor_type": vendor_type,
             "city": city
         }
         
@@ -540,7 +480,7 @@ async def find_matching_vendors(
         
         results = index.query(
             vector=avg_embedding,
-            top_k=top_k * 10,  # Get more results to group by vendor
+            top_k=top_k * 10,
             filter=search_filter,
             include_metadata=True
         )
@@ -555,7 +495,7 @@ async def find_matching_vendors(
                 "message": f"No matching {vendor_type}s found. We're onboarding more {city} {vendor_type}s!"
             }
         
-        # 5. Group results by vendor and calculate match scores
+        # 5. Group results by vendor
         vendor_data = {}
         
         for match in results.matches:
@@ -571,7 +511,6 @@ async def find_matching_vendors(
             
             vendor_data[vendor_id]["scores"].append(match.score)
             
-            # Keep top 4 sample images per vendor
             if len(vendor_data[vendor_id]["sample_images"]) < 4:
                 vendor_data[vendor_id]["sample_images"].append({
                     "file_path": match.metadata.get("file_path"),
@@ -579,7 +518,7 @@ async def find_matching_vendors(
                     "similarity_score": round(match.score, 3)
                 })
         
-        # 6. Get full vendor profiles from database
+        # 6. Get full vendor profiles
         vendor_ids = list(vendor_data.keys())
         
         vendors_response = supabase.table("vendors").select(
@@ -591,12 +530,11 @@ async def find_matching_vendors(
          .eq("city", city)\
          .execute()
         
-        # 7. Get review statistics for each vendor
+        # 7. Get review statistics
         reviews_response = supabase.table("vendor_reviews").select(
             "vendor_id, rating"
         ).in_("vendor_id", vendor_ids).eq("is_visible", True).execute()
         
-        # Calculate average ratings per vendor
         vendor_ratings = {}
         for review in reviews_response.data:
             vid = review["vendor_id"]
@@ -604,30 +542,26 @@ async def find_matching_vendors(
                 vendor_ratings[vid] = []
             vendor_ratings[vid].append(review["rating"])
         
-        # 8. Combine match scores with vendor profiles
+        # 8. Combine scores with vendor profiles
         matching_vendors = []
         
         for vendor in vendors_response.data:
             vendor_id = vendor["id"]
             scores = vendor_data[vendor_id]["scores"]
             avg_score = np.mean(scores)
-            match_percentage = round(avg_score * 100, 1)  # Convert to percentage
+            match_percentage = round(avg_score * 100, 1)
             
-            # Calculate average rating
             ratings = vendor_ratings.get(vendor_id, [])
             avg_rating = round(np.mean(ratings), 1) if ratings else None
             review_count = len(ratings)
             
             matching_vendors.append({
-                # Match Info
                 "match_percentage": match_percentage,
-                "match_rank": None,  # Will be set after sorting
+                "match_rank": None,
                 "num_matching_images": len(scores),
-                
-                # Vendor Profile
                 "vendor_id": vendor_id,
                 "business_name": vendor["business_name"],
-                "vendor_type": vendor["vendor_type"],  # Added for clarity
+                "vendor_type": vendor["vendor_type"],
                 "tagline": vendor.get("tagline"),
                 "description": vendor["description"],
                 "instagram_handle": vendor.get("instagram_handle"),
@@ -636,16 +570,12 @@ async def find_matching_vendors(
                 "location": f"{vendor['city']}, {vendor['state']}",
                 "verified": vendor.get("verified", False),
                 "years_in_business": vendor.get("years_in_business"),
-                
-                # Social Proof
                 "avg_rating": avg_rating,
                 "review_count": review_count,
-                
-                # Sample Images
                 "sample_images": vendor_data[vendor_id]["sample_images"]
             })
         
-        # 9. Sort by match percentage and assign ranks
+        # 9. Sort and assign ranks
         matching_vendors.sort(key=lambda x: x["match_percentage"], reverse=True)
         
         for rank, vendor in enumerate(matching_vendors[:top_k], start=1):
@@ -683,16 +613,23 @@ async def find_matching_vendors(
         logging.error(f"Vendor matching failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Matching failed: {str(e)}")
 
+# ===================================
+# UTILITY ENDPOINTS
+# ===================================
+@app.get("/")
+def root():
+    """Welcome endpoint"""
+    return {"message": "Welcome to Planistry Backend!"}
+
 @app.get("/health")
 async def health_check():
-    # Test Pinecone connection
+    """Health check with service status"""
     try:
         index.describe_index_stats()
         pinecone_healthy = True
     except:
         pinecone_healthy = False
     
-    # Test Supabase connection
     try:
         supabase.table("images").select("id").limit(1).execute()
         supabase_healthy = True
@@ -707,5 +644,3 @@ async def health_check():
         "pinecone_connected": pinecone_healthy,
         "supabase_connected": supabase_healthy
     }
-
-
