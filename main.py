@@ -481,6 +481,211 @@ async def upload_vendor_images(
         "total_failed": len([r for r in results if r["status"] == "error"])
     }
 
+# -------------------------------
+# Vendor matching endpoint
+# ------------------------------- 
+@app.post("/find-matching-vendors")
+async def find_matching_vendors(
+    couple_id: str = Form(...),
+    vendor_type: str = Form("florist"),  # florist, photographer, venue, caterer, planner, dj
+    category: str = Form(None),  # Optional: bouquet, centerpiece, etc.
+    city: str = Form("Austin"),  # For future expansion
+    state: str = Form("TX"),
+    top_k: int = Form(10),
+    min_match_score: float = Form(0.7)  # Filter out low matches
+):
+    """
+    Find vendors whose work matches the couple's aesthetic.
+    Generic endpoint that works for any vendor type.
+    Returns rich vendor profiles with match percentages (The Knot style).
+    """
+    try:
+        # 1. Get couple's image embeddings from Supabase
+        query = supabase.table("images").select("id, embedding_id, category").eq("couple_id", couple_id)
+        
+        if category:
+            query = query.eq("category", category)
+        
+        couple_images = query.execute()
+        
+        if not couple_images.data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No images found for couple {couple_id}"
+            )
+        
+        logging.info(f"Found {len(couple_images.data)} images for couple {couple_id}")
+        
+        # 2. Fetch embeddings from Pinecone
+        embedding_ids = [img["embedding_id"] for img in couple_images.data]
+        fetch_response = index.fetch(ids=embedding_ids)
+        couple_embeddings = [
+            fetch_response.vectors[id].values 
+            for id in embedding_ids 
+            if id in fetch_response.vectors
+        ]
+        
+        if not couple_embeddings:
+            raise HTTPException(status_code=404, detail="Could not fetch embeddings from Pinecone")
+        
+        # 3. Calculate average embedding (their "ideal aesthetic")
+        avg_embedding = np.mean(couple_embeddings, axis=0).tolist()
+        logging.info(f"Calculated average aesthetic embedding for couple {couple_id}")
+        
+        # 4. Query Pinecone for similar vendor images
+        search_filter = {
+            "type": "vendor_image",
+            "vendor_type": vendor_type,  # Dynamic vendor type filtering
+            "city": city
+        }
+        
+        if category:
+            search_filter["category"] = category
+        
+        results = index.query(
+            vector=avg_embedding,
+            top_k=top_k * 10,  # Get more results to group by vendor
+            filter=search_filter,
+            include_metadata=True
+        )
+        
+        if not results.matches:
+            return {
+                "couple_id": couple_id,
+                "vendor_type": vendor_type,
+                "category": category,
+                "location": f"{city}, {state}",
+                "matching_vendors": [],
+                "message": f"No matching {vendor_type}s found. We're onboarding more {city} {vendor_type}s!"
+            }
+        
+        # 5. Group results by vendor and calculate match scores
+        vendor_data = {}
+        
+        for match in results.matches:
+            vendor_id = match.metadata.get("vendor_id")
+            if not vendor_id or match.score < min_match_score:
+                continue
+            
+            if vendor_id not in vendor_data:
+                vendor_data[vendor_id] = {
+                    "scores": [],
+                    "sample_images": []
+                }
+            
+            vendor_data[vendor_id]["scores"].append(match.score)
+            
+            # Keep top 4 sample images per vendor
+            if len(vendor_data[vendor_id]["sample_images"]) < 4:
+                vendor_data[vendor_id]["sample_images"].append({
+                    "file_path": match.metadata.get("file_path"),
+                    "category": match.metadata.get("category"),
+                    "similarity_score": round(match.score, 3)
+                })
+        
+        # 6. Get full vendor profiles from database
+        vendor_ids = list(vendor_data.keys())
+        
+        vendors_response = supabase.table("vendors").select(
+            "id, business_name, tagline, description, instagram_handle, website, "
+            "price_range, city, state, verified, years_in_business, vendor_type"
+        ).in_("id", vendor_ids)\
+         .eq("is_active", True)\
+         .eq("vendor_type", vendor_type)\
+         .eq("city", city)\
+         .execute()
+        
+        # 7. Get review statistics for each vendor
+        reviews_response = supabase.table("vendor_reviews").select(
+            "vendor_id, rating"
+        ).in_("vendor_id", vendor_ids).eq("is_visible", True).execute()
+        
+        # Calculate average ratings per vendor
+        vendor_ratings = {}
+        for review in reviews_response.data:
+            vid = review["vendor_id"]
+            if vid not in vendor_ratings:
+                vendor_ratings[vid] = []
+            vendor_ratings[vid].append(review["rating"])
+        
+        # 8. Combine match scores with vendor profiles
+        matching_vendors = []
+        
+        for vendor in vendors_response.data:
+            vendor_id = vendor["id"]
+            scores = vendor_data[vendor_id]["scores"]
+            avg_score = np.mean(scores)
+            match_percentage = round(avg_score * 100, 1)  # Convert to percentage
+            
+            # Calculate average rating
+            ratings = vendor_ratings.get(vendor_id, [])
+            avg_rating = round(np.mean(ratings), 1) if ratings else None
+            review_count = len(ratings)
+            
+            matching_vendors.append({
+                # Match Info
+                "match_percentage": match_percentage,
+                "match_rank": None,  # Will be set after sorting
+                "num_matching_images": len(scores),
+                
+                # Vendor Profile
+                "vendor_id": vendor_id,
+                "business_name": vendor["business_name"],
+                "vendor_type": vendor["vendor_type"],  # Added for clarity
+                "tagline": vendor.get("tagline"),
+                "description": vendor["description"],
+                "instagram_handle": vendor.get("instagram_handle"),
+                "website": vendor.get("website"),
+                "price_range": vendor.get("price_range"),
+                "location": f"{vendor['city']}, {vendor['state']}",
+                "verified": vendor.get("verified", False),
+                "years_in_business": vendor.get("years_in_business"),
+                
+                # Social Proof
+                "avg_rating": avg_rating,
+                "review_count": review_count,
+                
+                # Sample Images
+                "sample_images": vendor_data[vendor_id]["sample_images"]
+            })
+        
+        # 9. Sort by match percentage and assign ranks
+        matching_vendors.sort(key=lambda x: x["match_percentage"], reverse=True)
+        
+        for rank, vendor in enumerate(matching_vendors[:top_k], start=1):
+            vendor["match_rank"] = rank
+        
+        # 10. Log match for analytics
+        for vendor in matching_vendors[:top_k]:
+            try:
+                supabase.table("vendor_matches").insert({
+                    "couple_id": couple_id,
+                    "vendor_id": vendor["vendor_id"],
+                    "match_score": vendor["match_percentage"] / 100,
+                    "match_rank": vendor["match_rank"],
+                    "matched_category": category,
+                    "num_images_compared": len(couple_embeddings)
+                }).execute()
+            except Exception as e:
+                logging.warning(f"Failed to log match: {str(e)}")
+        
+        logging.info(f"Found {len(matching_vendors)} matching {vendor_type}s for couple {couple_id}")
+        
+        return {
+            "couple_id": couple_id,
+            "vendor_type": vendor_type,
+            "category": category,
+            "location": f"{city}, {state}",
+            "num_couple_images_analyzed": len(couple_embeddings),
+            "matching_vendors": matching_vendors[:top_k],
+            "total_vendors_found": len(matching_vendors)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Vendor matching failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Matching failed: {str(e)}")
 
 @app.get("/health")
 async def health_check():
