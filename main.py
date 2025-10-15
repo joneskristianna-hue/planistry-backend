@@ -347,127 +347,136 @@ def get_image_embedding(file_bytes: bytes):
 @app.post("/upload-vendor-images")
 async def upload_vendor_images(
     vendor_id: str = Form(...),
-    category: str = Form(...),
+    vendor_type: str = Form("florist"),  # NEW: florist, photographer, venue, etc.
+    category: str = Form("florals"),
+    city: str = Form("Austin"),  # NEW: for multi-city support
+    state: str = Form("TX"),  # NEW: for state-level filtering
     files: list[UploadFile] = File(...)
 ):
+    """
+    Upload vendor portfolio images and generate embeddings.
+    Generic endpoint that works for any vendor type.
+    """
     results = []
 
     for file in files:
-        # Validate file type
-        if not file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+        # 1) Validate file type
+        if not file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
             logging.warning(f"Rejected file with invalid type: {file.filename}")
             results.append({
                 "file_name": file.filename,
                 "status": "error",
-                "detail": "File type not allowed"
+                "detail": "File type not allowed. Use PNG, JPG, JPEG, or WEBP"
             })
             continue
 
+        # 2) Read file bytes
         contents = await file.read()
 
-        # Check for duplicates
-        existing = supabase.table("vendor_images").select("*")\
-            .eq("vendor_id", vendor_id)\
-            .eq("file_name", file.filename)\
-            .eq("category", category)\
-            .execute()
+        # 3) Upload to Supabase Storage
+        # Organize by vendor type: vendors/{vendor_type}/{vendor_id}/{category}/
+        path = f"vendors/{vendor_type}/{vendor_id}/{category}/{uuid.uuid4()}_{file.filename}"
+        try:
+            res = supabase.storage.from_(BUCKET).upload(
+                path,
+                contents,
+                {"content-type": file.content_type}
+            )
+        except Exception as e:
+            logging.error(f"Upload failed for {file.filename}: {str(e)}")
+            results.append({
+                "file_name": file.filename,
+                "status": "error",
+                "detail": f"Storage upload failed: {str(e)}"
+            })
+            continue
 
-        duplicate_prevented = False
-        new_row_created = False
+        file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
 
-        if existing.data:
-            duplicate_prevented = True
-            file_url = existing.data[0]["file_path"]
-            logging.info(f"Duplicate prevented: {file.filename} for vendor {vendor_id}, category {category}")
-        else:
-            # Upload to Supabase Storage
-            path = f"{vendor_id}/{category}/{uuid.uuid4()}_{file.filename}"
-            try:
-                res = supabase.storage.from_(BUCKET).upload(
-                    path,
-                    contents,
-                    {"content-type": file.content_type}
-                )
-            except Exception as e:
-                logging.error(f"Upload failed for {file.filename}: {str(e)}")
-                results.append({
-                    "file_name": file.filename,
-                    "status": "error",
-                    "detail": f"Supabase storage upload failed: {str(e)}"
-                })
-                continue
+        # 4) Generate embedding
+        try:
+            embedding = get_image_embedding(contents)
+            logging.info(f"Generated embedding for {vendor_type} image: {file.filename}")
+        except Exception as e:
+            logging.error(f"Embedding generation failed for {file.filename}: {str(e)}")
+            results.append({
+                "file_name": file.filename,
+                "status": "error",
+                "detail": f"Embedding generation failed: {str(e)}"
+            })
+            continue
 
-            file_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+        # 5) Generate unique ID
+        image_id = str(uuid.uuid4())
 
-            # Generate embedding
-            try:
-                embedding = get_image_embedding(contents)
-                logging.info(f"Generated embedding for {file.filename}: {len(embedding)} dimensions")
-            except Exception as e:
-                logging.error(f"Embedding generation failed for {file.filename}: {str(e)}")
-                results.append({
-                    "file_name": file.filename,
-                    "status": "error",
-                    "detail": f"Embedding generation failed: {str(e)}"
-                })
-                continue
-
-            image_id = str(uuid.uuid4())
-
-            # Insert into Pinecone
-            try:
-                index.upsert(vectors=[(
-                    image_id,
-                    embedding,
-                    {
-                        "vendor_id": vendor_id,
-                        "category": category,
-                        "file_path": file_url,
-                        "file_name": file.filename,
-                        "type": "vendor_image"
-                    }
-                )])
-                logging.info(f"Inserted {file.filename} into Pinecone with ID {image_id}")
-            except Exception as e:
-                logging.error(f"Pinecone insert failed for {file.filename}: {str(e)}")
-                results.append({
-                    "file_name": file.filename,
-                    "status": "error",
-                    "detail": f"Pinecone insert failed: {str(e)}"
-                })
-                continue
-
-            # Insert metadata into Supabase vendor_images table
-            try:
-                supabase.table("vendor_images").insert({
-                    "id": image_id,
+        # 6) Insert into Pinecone with COMPLETE metadata
+        try:
+            index.upsert(vectors=[(
+                image_id,
+                embedding,
+                {
+                    # Vendor identification
                     "vendor_id": vendor_id,
-                    "file_name": file.filename,
-                    "file_path": file_url,
+                    "vendor_type": vendor_type,  # ← CRITICAL for filtering!
+                    
+                    # Categorization
                     "category": category,
-                    "embedding_id": image_id
-                }).execute()
-                new_row_created = True
-                logging.info(f"Inserted {file.filename} metadata into vendor_images")
-            except Exception as e:
-                logging.error(f"Inserting metadata failed for {file.filename}: {str(e)}")
-                results.append({
+                    
+                    # Location (for multi-city expansion)
+                    "city": city,
+                    "state": state,
+                    
+                    # File info
+                    "file_path": file_url,
                     "file_name": file.filename,
-                    "status": "error",
-                    "detail": f"Inserting metadata failed: {str(e)}"
-                })
-                continue
+                    
+                    # Type marker
+                    "type": "vendor_image"  # vs "couple_image"
+                }
+            )])
+            logging.info(f"Inserted {vendor_type} image into Pinecone: {file.filename} (city: {city})")
+        except Exception as e:
+            logging.error(f"Pinecone insert failed for {file.filename}: {str(e)}")
+            results.append({
+                "file_name": file.filename,
+                "status": "error",
+                "detail": f"Pinecone insert failed: {str(e)}"
+            })
+            continue
 
+        # 7) Insert metadata into Supabase
+        try:
+            supabase.table("vendor_images").insert({
+                "id": image_id,
+                "vendor_id": vendor_id,
+                "file_name": file.filename,
+                "file_path": file_url,
+                "category": category,
+                "embedding_id": image_id
+            }).execute()
+            logging.info(f"Inserted {vendor_type} image metadata into Supabase")
+        except Exception as e:
+            logging.error(f"Database insert failed for {file.filename}: {str(e)}")
+            results.append({
+                "file_name": file.filename,
+                "status": "error",
+                "detail": f"Database insert failed: {str(e)}"
+            })
+            continue
+
+        # Success!
         results.append({
             "file_name": file.filename,
             "file_url": file_url,
-            "duplicate_prevented": duplicate_prevented,
-            "new_row_created": new_row_created,
             "status": "success"
         })
 
     return {
         "results": results,
+        "vendor_id": vendor_id,
+        "vendor_type": vendor_type,
+        "category": category,
+        "location": f"{city}, {state}",
         "total_uploaded": len([r for r in results if r["status"] == "success"]),
         "total_failed": len([r for r in results if r["status"] == "error"])
     }
