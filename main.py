@@ -138,8 +138,6 @@ import io
 import numpy as np
 from pinecone import Pinecone
 
-app = FastAPI()
-
 # Load CLIP model once when server starts
 model = SentenceTransformer('clip-ViT-B-32')
 
@@ -313,8 +311,6 @@ from PIL import Image
 import io
 import numpy as np
 from pinecone import Pinecone
-
-app = FastAPI()
 
 # Load CLIP model once when server starts
 model = SentenceTransformer('clip-ViT-B-32')
