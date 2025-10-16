@@ -77,9 +77,14 @@ def get_image_embedding(file_bytes: bytes):
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        embedding = model.encode(image, convert_to_numpy=True)
-        # Normalize for cosine similarity
-        embedding = embedding / np.linalg.norm(embedding)
+        # Let SentenceTransformer handle normalization internally
+        embedding = model.encode(
+            image, 
+            convert_to_numpy=True,
+            normalize_embeddings=True,  # Built-in normalization
+            show_progress_bar=False
+        )
+        
         return embedding.tolist()
     except Exception as e:
         raise Exception(f"Embedding generation failed: {str(e)}")
@@ -548,7 +553,10 @@ async def find_matching_vendors(
         for vendor in vendors_response.data:
             vendor_id = vendor["id"]
             scores = vendor_data[vendor_id]["scores"]
-            avg_score = np.mean(scores)
+            # Use top 5 scores only (or fewer if vendor has less than 5 matching images)
+            top_n = 5
+            top_scores = sorted(scores, reverse=True)[:top_n]
+            avg_score = np.mean(top_scores)
             match_percentage = round(avg_score * 100, 1)
             
             ratings = vendor_ratings.get(vendor_id, [])

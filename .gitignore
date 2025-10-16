@@ -29,4 +29,4 @@ dist/
 # Model/data files (future)
 *.pt
 *.pth
-*.onnx
+*.onnx.cache/
