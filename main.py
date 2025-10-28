@@ -14,6 +14,7 @@ import uuid
 import logging
 import io
 import numpy as np
+from fastapi.middleware.cors import CORSMiddleware
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +30,18 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 # INITIALIZE APP & SERVICES (Once!)
 # ===================================
 app = FastAPI(title="Planistry Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # For local development
+        "https://planistry.vercel.app",  # Your production frontend (we'll deploy here)
+        "https://*.vercel.app",  # All Vercel preview deployments
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
