@@ -118,6 +118,7 @@ async def signup(payload: SignupRequest):
         raise HTTPException(status_code=400, detail="Signup failed")
 
     user = res.user
+    session = res.session
 
     # Insert into couples table
     try:
@@ -144,6 +145,7 @@ async def signup(payload: SignupRequest):
 
     return {
         "message": "Signup successful",
+        "access_token": session.access_token,
         "user": {
             "id": user.id,
             "email": user.email,
@@ -160,12 +162,14 @@ async def login(payload: LoginRequest):
             "password": payload.password
         })
         user = res.user
+        session = res.session
         
         if user is None:
             raise HTTPException(status_code=401, detail="Email or password is incorrect")
         
         return {
             "message": "Login successful",
+            "access_token": session.access_token,
             "user": {
                 "id": user.id,
                 "email": user.email,
