@@ -20,13 +20,16 @@ env/
 
 # Logs / cache
 *.log
+.cache/            # 🚨 Ignore Hugging Face + embedding model caches
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
 
-# Model/data files (future)
+# Model/data files
 *.pt
 *.pth
-*.onnx.cache/
+*.onnx
+*.bin
+*.safetensors
