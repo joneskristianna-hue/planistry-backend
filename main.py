@@ -1,7 +1,7 @@
 # ===================================
 # IMPORTS (All at the top)
 # ===================================
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from pydantic import BaseModel
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
@@ -17,6 +17,7 @@ import numpy as np
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import date
 from typing import Optional
+
 
 # Load environment variables
 load_dotenv()
@@ -832,6 +833,151 @@ async def get_vendor_profile(vendor_id: str):
         logging.error(f"Failed to fetch vendor profile: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to fetch vendor profile: {str(e)}"
+        )
+
+
+# ===================================
+# Returns couple information for dashboard
+# ===================================
+@app.get("/couples/{couple_id}/dashboard")
+async def get_couple_dashboard(couple_id: str):
+    """
+    Get couple's dashboard data:
+    - Profile info (name, email, wedding_date)
+    - Uploaded images grouped by category
+    - Recent matched vendors
+    """
+
+    try:
+        # 1. Get couple profile
+        couple_response = (
+            supabase.table("couples").select("*").eq("id", couple_id).execute()
+        )
+
+        if not couple_response.data or len(couple_response.data) == 0:
+            raise HTTPException(status_code=404, detail="Couple not found")
+
+        couple = couple_response.data[0]
+
+        # 2. Get all uploaded images
+        images_response = (
+            supabase.table("images")
+            .select("*")
+            .eq("couple_id", couple_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        images = images_response.data if images_response.data else []
+
+        # Group images by category
+        images_by_category = {}
+        for img in images:
+            category = img.get("category", "overall")
+            if category not in images_by_category:
+                images_by_category[category] = []
+            images_by_category[category].append(
+                {
+                    "id": img["id"],
+                    "file_path": img["file_path"],
+                    "file_name": img["file_name"],
+                    "category": img["category"],
+                    "created_at": img["created_at"],
+                }
+            )
+
+        # 3. Get matched vendors (recent matches)
+        matches_response = (
+            supabase.table("vendor_matches")
+            .select(
+                """
+            *,
+            vendors:vendor_id (
+                id,
+                business_name,
+                vendor_type,
+                tagline,
+                location,
+                price_range,
+                verified,
+                years_in_business
+            )
+        """
+            )
+            .eq("couple_id", couple_id)
+            .order("match_score", desc=True)
+            .limit(6)
+            .execute()
+        )
+
+        matched_vendors = []
+        if matches_response.data:
+            for match in matches_response.data:
+                vendor = match.get("vendors")
+                if vendor:
+                    # Get one sample image for the vendor
+                    vendor_img_response = (
+                        supabase.table("vendor_images")
+                        .select("file_path")
+                        .eq("vendor_id", vendor["id"])
+                        .limit(1)
+                        .execute()
+                    )
+
+                    sample_image = None
+                    if vendor_img_response.data and len(vendor_img_response.data) > 0:
+                        sample_image = vendor_img_response.data[0]["file_path"]
+
+                    matched_vendors.append(
+                        {
+                            "vendor_id": vendor["id"],
+                            "business_name": vendor["business_name"],
+                            "vendor_type": vendor["vendor_type"],
+                            "tagline": vendor.get("tagline"),
+                            "location": vendor.get("location"),
+                            "price_range": vendor.get("price_range"),
+                            "verified": vendor.get("verified", False),
+                            "years_in_business": vendor.get("years_in_business"),
+                            "match_percentage": round(match["match_score"] * 100, 1),
+                            "sample_image": sample_image,
+                            "matched_at": match["created_at"],
+                        }
+                    )
+
+        # 4. Calculate stats
+        total_images = len(images)
+        categories_used = list(images_by_category.keys())
+        total_matches = len(matched_vendors)
+
+        return {
+            "couple": {
+                "id": couple["id"],
+                "name": couple["name"],
+                "email": couple["email"],
+                "wedding_date": couple.get("wedding_date"),
+                "location": couple.get("location"),
+                "budget": couple.get("budget"),
+                "guest_range": couple.get("guest_range"),
+            },
+            "images": {
+                "all": images,
+                "by_category": images_by_category,
+                "total_count": total_images,
+                "categories": categories_used,
+            },
+            "matched_vendors": matched_vendors,
+            "stats": {
+                "total_images": total_images,
+                "total_matches": total_matches,
+                "categories_count": len(categories_used),
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching dashboard data: {str(e)}"
         )
 
 
