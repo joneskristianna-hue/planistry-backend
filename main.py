@@ -15,6 +15,8 @@ import logging
 import io
 import numpy as np
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import date
+from typing import Optional
 
 # Load environment variables
 load_dotenv()
@@ -76,6 +78,7 @@ class SignupRequest(BaseModel):
     email: str
     password: str
     name: str | None = None
+    wedding_date: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -128,7 +131,7 @@ async def signup(payload: SignupRequest):
                 "id": user.id,
                 "name": payload.name,
                 "email": payload.email,
-                "wedding_date": None,
+                "wedding_date": payload.wedding_date,  # Now accepts the date from form
                 "budget": 0,
                 "guest_range": 0,
                 "location": "",
