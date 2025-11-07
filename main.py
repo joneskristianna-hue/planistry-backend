@@ -887,23 +887,10 @@ async def get_couple_dashboard(couple_id: str):
             )
 
         # 3. Get matched vendors (recent matches)
+        # First get the matches
         matches_response = (
             supabase.table("vendor_matches")
-            .select(
-                """
-            *,
-            vendors:vendor_id (
-                id,
-                business_name,
-                vendor_type,
-                tagline,
-                location,
-                price_range,
-                verified,
-                years_in_business
-            )
-        """
-            )
+            .select("*")
             .eq("couple_id", couple_id)
             .order("match_score", desc=True)
             .limit(6)
@@ -913,36 +900,55 @@ async def get_couple_dashboard(couple_id: str):
         matched_vendors = []
         if matches_response.data:
             for match in matches_response.data:
-                vendor = match.get("vendors")
-                if vendor:
-                    # Get one sample image for the vendor
-                    vendor_img_response = (
-                        supabase.table("vendor_images")
-                        .select("file_path")
-                        .eq("vendor_id", vendor["id"])
-                        .limit(1)
+                vendor_id = match.get("vendor_id")
+
+                if vendor_id:
+                    # Get vendor details separately
+                    vendor_response = (
+                        supabase.table("vendors")
+                        .select("*")
+                        .eq("id", vendor_id)
                         .execute()
                     )
 
-                    sample_image = None
-                    if vendor_img_response.data and len(vendor_img_response.data) > 0:
-                        sample_image = vendor_img_response.data[0]["file_path"]
+                    if vendor_response.data and len(vendor_response.data) > 0:
+                        vendor = vendor_response.data[0]
 
-                    matched_vendors.append(
-                        {
-                            "vendor_id": vendor["id"],
-                            "business_name": vendor["business_name"],
-                            "vendor_type": vendor["vendor_type"],
-                            "tagline": vendor.get("tagline"),
-                            "location": vendor.get("location"),
-                            "price_range": vendor.get("price_range"),
-                            "verified": vendor.get("verified", False),
-                            "years_in_business": vendor.get("years_in_business"),
-                            "match_percentage": round(match["match_score"] * 100, 1),
-                            "sample_image": sample_image,
-                            "matched_at": match["created_at"],
-                        }
-                    )
+                        # Get one sample image for the vendor
+                        vendor_img_response = (
+                            supabase.table("vendor_images")
+                            .select("file_path")
+                            .eq("vendor_id", vendor_id)
+                            .limit(1)
+                            .execute()
+                        )
+
+                        sample_image = None
+                        if (
+                            vendor_img_response.data
+                            and len(vendor_img_response.data) > 0
+                        ):
+                            sample_image = vendor_img_response.data[0]["file_path"]
+
+                        matched_vendors.append(
+                            {
+                                "vendor_id": vendor["id"],
+                                "business_name": vendor["business_name"],
+                                "vendor_type": vendor["vendor_type"],
+                                "tagline": vendor.get("tagline"),
+                                "location": f"{vendor.get('city', '')}, {vendor.get('state', '')}".strip(
+                                    ", "
+                                ),
+                                "price_range": vendor.get("price_range"),
+                                "verified": vendor.get("verified", False),
+                                "years_in_business": vendor.get("years_in_business"),
+                                "match_percentage": round(
+                                    match["match_score"] * 100, 1
+                                ),
+                                "sample_image": sample_image,
+                                "matched_at": match["created_at"],
+                            }
+                        )
 
         # 4. Calculate stats
         total_images = len(images)
@@ -976,6 +982,7 @@ async def get_couple_dashboard(couple_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Dashboard error: {str(e)}")  # For debugging
         raise HTTPException(
             status_code=500, detail=f"Error fetching dashboard data: {str(e)}"
         )
