@@ -845,7 +845,7 @@ async def get_couple_dashboard(couple_id: str):
     Get couple's dashboard data:
     - Profile info (name, email, wedding_date)
     - Uploaded images grouped by category
-    - Recent matched vendors
+    - Recent matched vendors (deduplicated)
     """
 
     try:
@@ -886,21 +886,26 @@ async def get_couple_dashboard(couple_id: str):
                 }
             )
 
-        # 3. Get matched vendors (recent matches)
-        # First get the matches
+        # 3. Get matched vendors (recent matches) - DEDUPLICATED
+        # First get all matches, ordered by match score
         matches_response = (
             supabase.table("vendor_matches")
             .select("*")
             .eq("couple_id", couple_id)
             .order("match_score", desc=True)
-            .limit(6)
             .execute()
         )
 
         matched_vendors = []
+        seen_vendor_ids = set()  # Track vendors we've already added
+
         if matches_response.data:
             for match in matches_response.data:
                 vendor_id = match.get("vendor_id")
+
+                # Skip if we've already added this vendor
+                if vendor_id in seen_vendor_ids:
+                    continue
 
                 if vendor_id:
                     # Get vendor details separately
@@ -950,10 +955,17 @@ async def get_couple_dashboard(couple_id: str):
                             }
                         )
 
+                        # Mark this vendor as seen
+                        seen_vendor_ids.add(vendor_id)
+
+                        # Stop after 6 unique vendors
+                        if len(matched_vendors) >= 6:
+                            break
+
         # 4. Calculate stats
         total_images = len(images)
         categories_used = list(images_by_category.keys())
-        total_matches = len(matched_vendors)
+        total_matches = len(seen_vendor_ids)  # Count unique vendors
 
         return {
             "couple": {
