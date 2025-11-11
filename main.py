@@ -38,7 +38,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # For local development
-        "https://planistry.vercel.app",  # Your production frontend (we'll deploy here)
+        "https://planistry-frontend.vercel.app",  # Your production frontend (we'll deploy here)
         "https://*.vercel.app",  # All Vercel preview deployments
     ],
     allow_credentials=True,
